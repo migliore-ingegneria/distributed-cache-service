@@ -608,3 +608,8 @@ The "main" branch is protected. Pull Requests cannot be merged unless:
     * `Require status checks to pass before merging`.
     * Search and select: `CI Success`.
     * `Require a pull request before merging`.
+
+
+## Architecture Specifications
+- 256 vnodes per host
+- Lock-free memory allocations

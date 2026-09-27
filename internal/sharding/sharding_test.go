@@ -1,6 +1,7 @@
 package sharding
 
 import (
+	"context"
 	"strconv"
 	"testing"
 )
@@ -87,4 +88,69 @@ func calculateStdDev(counts map[string]int, total, n int) float64 {
 		sumSquares += diff * diff
 	}
 	return (sumSquares / float64(n)) // Simplified variance (not sqrt for comparison but named stddev for clarity)
+}
+
+func TestDefaultVirtualNodes(t *testing.T) {
+	m := New(0, nil)
+	if m.virtualNodes != DefaultVirtualNodes {
+		t.Errorf("Expected default virtual nodes to be %d, got %d", DefaultVirtualNodes, m.virtualNodes)
+	}
+}
+
+func TestCalculateRebalancePlan_Graceful1OverN(t *testing.T) {
+	currentRing := New(256, nil)
+	currentRing.Add("node1", "node2", "node3")
+
+	targetRing := New(256, nil)
+	targetRing.Add("node1", "node2", "node3", "node4") // node4 joins
+
+	var keys []string
+	for i := 0; i < 1000; i++ {
+		keys = append(keys, "cache_key_"+strconv.Itoa(i))
+	}
+
+	plan, err := currentRing.CalculateRebalancePlan(context.Background(), keys, targetRing)
+	if err != nil {
+		t.Fatalf("unexpected rebalance error: %v", err)
+	}
+
+	if plan.TotalKeys != 1000 {
+		t.Errorf("expected 1000 total keys, got %d", plan.TotalKeys)
+	}
+
+	// Adding a 4th node (3 -> 4) should ideally move ~1/4 (25%) of total keys to node4
+	migratedRatio := float64(len(plan.MigratedKeys)) / float64(plan.TotalKeys)
+	t.Logf("Migrated keys ratio upon 4th node join: %.2f%% (%d/1000)", migratedRatio*100, len(plan.MigratedKeys))
+
+	if migratedRatio < 0.15 || migratedRatio > 0.35 {
+		t.Errorf("expected ~25%% key migration ratio, got %.2f%%", migratedRatio*100)
+	}
+
+	// Assert all migrated keys are targeting node4
+	for _, m := range plan.MigratedKeys {
+		if m.Target != "node4" {
+			t.Errorf("expected migrated key target to be node4, got %s", m.Target)
+		}
+	}
+}
+
+func TestCalculateRebalancePlan_ContextCancellation(t *testing.T) {
+	currentRing := New(256, nil)
+	currentRing.Add("node1", "node2")
+
+	targetRing := New(256, nil)
+	targetRing.Add("node1", "node2", "node3")
+
+	var keys []string
+	for i := 0; i < 1000; i++ {
+		keys = append(keys, "cache_key_"+strconv.Itoa(i))
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel context immediately
+
+	_, err := currentRing.CalculateRebalancePlan(ctx, keys, targetRing)
+	if err == nil {
+		t.Errorf("expected error on cancelled context, got nil")
+	}
 }

@@ -1,11 +1,20 @@
 package sharding
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"hash/crc32"
 	"sort"
 	"strconv"
 	"sync"
 )
+
+// DefaultVirtualNodes defines the standard 256 vnodes per physical node topology.
+const DefaultVirtualNodes = 256
+
+// ErrContextCancelled is returned when key rebalance calculation is interrupted by context cancellation.
+var ErrContextCancelled = errors.New("rebalance operation cancelled by context")
 
 // Hash maps bytes to uint32
 type Hash func(data []byte) uint32
@@ -19,8 +28,26 @@ type Map struct {
 	mu           sync.RWMutex
 }
 
-// New creates a new Map object
+// KeyMigration describes a single key transfer between node topologies.
+type KeyMigration struct {
+	Key    string
+	Source string
+	Target string
+}
+
+// RebalancePlan represents the planned key transfers for node join/leave events.
+type RebalancePlan struct {
+	MigratedKeys []KeyMigration
+	TotalKeys    int
+	UnmovedKeys  int
+}
+
+// New creates a new Map object. Defaults to 256 vnodes if virtualNodes <= 0.
 func New(virtualNodes int, fn Hash) *Map {
+	if virtualNodes <= 0 {
+		virtualNodes = DefaultVirtualNodes
+	}
+
 	m := &Map{
 		virtualNodes: virtualNodes,
 		hash:         fn,
@@ -88,4 +115,38 @@ func (m *Map) Remove(key string) {
 	m.hashMap = newHashMap
 	m.keys = newKeys
 	sort.Ints(m.keys)
+}
+
+// CalculateRebalancePlan computes the minimal key migration set from current map `m` to targetMap.
+// Monitors ctx.Done() to gracefully cancel long-running rebalance calculations.
+func (m *Map) CalculateRebalancePlan(ctx context.Context, allKeys []string, targetMap *Map) (*RebalancePlan, error) {
+	plan := &RebalancePlan{
+		TotalKeys: len(allKeys),
+	}
+
+	for idx, key := range allKeys {
+		// Periodically check context cancellation to prevent memory leaks / blocking
+		if idx%64 == 0 {
+			select {
+			case <-ctx.Done():
+				return nil, fmt.Errorf("%w: %v", ErrContextCancelled, ctx.Err())
+			default:
+			}
+		}
+
+		currentHost := m.Get(key)
+		targetHost := targetMap.Get(key)
+
+		if currentHost != targetHost && targetHost != "" {
+			plan.MigratedKeys = append(plan.MigratedKeys, KeyMigration{
+				Key:    key,
+				Source: currentHost,
+				Target: targetHost,
+			})
+		} else {
+			plan.UnmovedKeys++
+		}
+	}
+
+	return plan, nil
 }

@@ -167,6 +167,37 @@ func (s *Store) deleteExpired() {
 	}
 }
 
+// SweepExpired samples up to sampleSize keys randomly from the store and evicts any expired keys found.
+// It returns the number of keys evicted.
+func (s *Store) SweepExpired(sampleSize int) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.items) == 0 || sampleSize <= 0 {
+		return 0
+	}
+
+	now := time.Now().UnixNano()
+	evicted := 0
+	count := 0
+
+	for k, v := range s.items {
+		if count >= sampleSize {
+			break
+		}
+		count++
+
+		if v.Expiration > 0 && now > v.Expiration {
+			delete(s.items, k)
+			if s.policy != nil {
+				s.policy.OnRemove(k)
+			}
+			evicted++
+		}
+	}
+	return evicted
+}
+
 // Snapshot serializes the current state of the store to the provided writer (IO sink).
 // This is used by Raft to take snapshots of the state machine.
 func (s *Store) Snapshot(w io.Writer) error {
